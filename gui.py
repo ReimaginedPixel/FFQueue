@@ -200,11 +200,16 @@ class App(tk.Tk):
         ttk.Button(bar, text="Clear List",
                    command=self._clear_scheduled).pack(side="right", padx=4)
 
-        # --- Treeview ---
+        # --- Treeview (inside its own sub-frame so grid+pack don't conflict) ---
+        tree_frame = ttk.Frame(frame)
+        tree_frame.pack(fill="both", expand=True)
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+
         cols = ("file", "status", "original_exists",
                 "input_mb", "output_mb", "saved",
                 "encoder", "completed", "output_path")
-        self._stree = ttk.Treeview(frame, columns=cols, show="headings",
+        self._stree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                    selectmode="browse")
 
         self._stree.heading("file",            text="File",            anchor="w")
@@ -229,20 +234,13 @@ class App(tk.Tk):
 
         for tag, color in _SCHED_TAG_COLORS.items():
             self._stree.tag_configure(tag, foreground=color)
-        # Extra tag for deleted originals
         self._stree.tag_configure("original_gone", foreground="#9E9E9E")
-
-        # Sub-frame for treeview + scrollbars (grid manager stays inside here)
-        tree_frame = ttk.Frame(frame)
-        tree_frame.pack(fill="both", expand=True)
-        tree_frame.rowconfigure(0, weight=1)
-        tree_frame.columnconfigure(0, weight=1)
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical",   command=self._stree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self._stree.xview)
         self._stree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        self._stree.grid(row=0, column=0, sticky="nsew", in_=tree_frame)
+        self._stree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
 
