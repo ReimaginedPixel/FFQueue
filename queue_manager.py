@@ -68,18 +68,19 @@ class QueueManager:
                 ):
                     continue
                 self._items.append({
-                    "id":               str(uuid.uuid4()),
-                    "file_path":        path,
-                    "status":           PENDING,
-                    "added_at":         _now(),
-                    "started_at":       None,
-                    "completed_at":     None,
-                    "error":            None,
-                    "encoder_used":     None,
-                    "audio_kept":       None,
-                    "audio_dropped":    None,
-                    "input_size_bytes": None,
+                    "id":                str(uuid.uuid4()),
+                    "file_path":         path,
+                    "status":            PENDING,
+                    "added_at":          _now(),
+                    "started_at":        None,
+                    "completed_at":      None,
+                    "error":             None,
+                    "encoder_used":      None,
+                    "audio_kept":        None,
+                    "audio_dropped":     None,
+                    "input_size_bytes":  None,
                     "output_size_bytes": None,
+                    "final_path":        None,
                 })
                 added += 1
             self._save()
@@ -103,18 +104,20 @@ class QueueManager:
         audio_dropped: list[int] | None = None,
         input_size_bytes: int = 0,
         output_size_bytes: int = 0,
+        final_path: str = "",
         note: str = "",
     ) -> None:
         with self._lock:
             for item in self._items:
                 if item["id"] == item_id:
-                    item["status"]           = DONE
-                    item["completed_at"]     = _now()
-                    item["encoder_used"]     = encoder_used or note
-                    item["audio_kept"]       = audio_kept or []
-                    item["audio_dropped"]    = audio_dropped or []
-                    item["input_size_bytes"] = input_size_bytes
+                    item["status"]            = DONE
+                    item["completed_at"]      = _now()
+                    item["encoder_used"]      = encoder_used or note
+                    item["audio_kept"]        = audio_kept or []
+                    item["audio_dropped"]     = audio_dropped or []
+                    item["input_size_bytes"]  = input_size_bytes
                     item["output_size_bytes"] = output_size_bytes
+                    item["final_path"]        = final_path or item.get("file_path", "")
                     break
             self._save()
 

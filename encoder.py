@@ -13,6 +13,7 @@ import csv
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -229,6 +230,7 @@ class EncoderWorker:
         auto_shutdown: bool = False,
         silence_threshold_db: float = -90.0,
         silence_sample_seconds: int = 60,
+        output_dir: str = "",
         on_update: Optional[Callable[[dict], None]] = None,
     ) -> None:
         self._queue = queue
@@ -237,7 +239,15 @@ class EncoderWorker:
         self._auto_shutdown = auto_shutdown
         self._silence_threshold = silence_threshold_db
         self._silence_sample = silence_sample_seconds
+        self._output_dir = Path(output_dir) if output_dir else None
         self._on_update = on_update
+
+        if self._output_dir:
+            try:
+                self._output_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.error(f"Cannot create output_dir {self._output_dir!r}: {exc}")
+                self._output_dir = None
 
         self.state = EncoderState()
         self._stop_event = threading.Event()
@@ -432,19 +442,34 @@ class EncoderWorker:
         # ---- 6. Finalise -------------------------------------------------
         if success:
             output_size = temp_path.stat().st_size if temp_path.exists() else 0
+
+            # Replace original with encoded temp
             try:
                 os.replace(str(temp_path), file_path)
-                logger.info(
-                    f"Done: {file_path!r}  "
-                    f"{input_size/1_048_576:.1f} MB → {output_size/1_048_576:.1f} MB  "
-                    f"({(1 - output_size/max(input_size,1))*100:.1f}% reduction)"
-                )
             except OSError as exc:
                 logger.error(f"Rename failed for {file_path!r}: {exc}")
                 temp_path.unlink(missing_ok=True)
                 self._queue.mark_failed(item_id, f"Rename failed: {exc}")
                 self._session_failed += 1
                 return
+
+            # Move to output_dir if configured
+            final_path = file_path
+            if self._output_dir:
+                dest = self._output_dir / Path(file_path).name
+                try:
+                    shutil.move(file_path, str(dest))
+                    final_path = str(dest)
+                    logger.info(f"Moved to {dest!r}")
+                except OSError as exc:
+                    logger.error(f"Move to output_dir failed for {file_path!r}: {exc} — file stays in place.")
+
+            reduction = (1 - output_size / max(input_size, 1)) * 100
+            logger.info(
+                f"Done: {Path(file_path).name}  "
+                f"{input_size/1_048_576:.1f} MB → {output_size/1_048_576:.1f} MB  "
+                f"({reduction:.1f}% reduction)  →  {final_path!r}"
+            )
 
             reclaimed = max(input_size - output_size, 0)
             self._session_bytes_reclaimed += reclaimed
@@ -457,11 +482,11 @@ class EncoderWorker:
                 audio_dropped=dropped,
                 input_size_bytes=input_size,
                 output_size_bytes=output_size,
+                final_path=final_path,
             )
             self.state.update(progress_percent=100.0, eta_seconds=0.0)
             self._notify()
 
-            reduction = (1 - output_size / max(input_size, 1)) * 100
             _write_csv_row({
                 "timestamp":      _ts(),
                 "input_path":     file_path,

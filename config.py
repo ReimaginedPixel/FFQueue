@@ -20,6 +20,7 @@ _DEFAULTS: dict = {
     "api_port": 8000,
     "silence_threshold_db": -90.0,
     "silence_sample_seconds": 60,
+    "output_dir": "",   # Move encoded files here after success; "" = keep in place
 }
 
 

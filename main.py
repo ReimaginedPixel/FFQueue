@@ -54,6 +54,7 @@ def main() -> None:
         auto_shutdown=config["auto_shutdown"],
         silence_threshold_db=config["silence_threshold_db"],
         silence_sample_seconds=config["silence_sample_seconds"],
+        output_dir=config["output_dir"],
     )
 
     api_init(queue, encoder, config["api_key"])
