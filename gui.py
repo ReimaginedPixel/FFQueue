@@ -5,10 +5,13 @@ Must run in the main thread (Tkinter requirement).
 Polls the shared EncoderState every 500 ms via after().
 
 Tabs:
-  Queue   — pending + encoding items; add / start / stop controls
-  History — done + failed items with size stats and final path
+  Queue     — pending + encoding items; add / start / stop controls
+  Scheduled — completed/failed items; shows original path; lets user
+              open the folder or delete the original manually
 """
 
+import os
+import subprocess
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -29,43 +32,45 @@ _STATUS_COLORS: dict[str, str] = {
     "error":    "#B71C1C",
 }
 
-_TAG_COLORS: dict[str, str] = {
+_QUEUE_TAG_COLORS: dict[str, str] = {
     "encoding": "#1565C0",
-    "done":     "#2E7D32",
-    "failed":   "#B71C1C",
     "pending":  "#333333",
 }
 
-_HIST_TAG_COLORS: dict[str, str] = {
+_SCHED_TAG_COLORS: dict[str, str] = {
     "done":    "#2E7D32",
     "failed":  "#B71C1C",
-    "skipped": "#6A1E55",
+    "skipped": "#795548",
 }
 
 POLL_MS = 500
 
 
 def _mb(b: int | None) -> str:
-    if b is None:
-        return "—"
-    return f"{b / 1_048_576:.1f}"
+    return f"{b / 1_048_576:.1f}" if b else "—"
 
 
-def _pct(inp: int | None, out: int | None) -> str:
+def _saved(inp: int | None, out: int | None) -> str:
     if not inp or not out:
         return "—"
     return f"{(1 - out / inp) * 100:.1f}%"
 
 
+def _open_folder(path: str) -> None:
+    """Open Windows Explorer at the folder containing path."""
+    folder = str(Path(path).parent)
+    subprocess.Popen(["explorer", folder])
+
+
 class App(tk.Tk):
     def __init__(self, queue: "QueueManager", encoder: "EncoderWorker") -> None:
         super().__init__()
-        self._queue = queue
+        self._queue   = queue
         self._encoder = encoder
 
         self.title("FFQueue — NVENC Batch Encoder")
-        self.geometry("960x640")
-        self.minsize(780, 500)
+        self.geometry("980x660")
+        self.minsize(800, 520)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
@@ -80,6 +85,7 @@ class App(tk.Tk):
         style.configure("TButton", padding=6)
         style.configure("TLabelframe.Label", font=("Segoe UI", 9, "bold"))
         style.configure("TNotebook.Tab", padding=(12, 4))
+        style.configure("Danger.TButton", foreground="#B71C1C", padding=6)
 
         # --- Toolbar ---
         toolbar = ttk.Frame(self, padding=(8, 6))
@@ -88,7 +94,6 @@ class App(tk.Tk):
         ttk.Button(toolbar, text="Start Encoding",     command=self._start).pack(side="left", padx=3)
         ttk.Button(toolbar, text="Stop After Current", command=self._stop).pack(side="left", padx=3)
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=6)
-        ttk.Button(toolbar, text="Clear Finished",     command=self._clear).pack(side="left", padx=3)
         ttk.Button(toolbar, text="Remove Selected",    command=self._remove_selected).pack(side="left", padx=3)
 
         # --- Status panel ---
@@ -99,24 +104,28 @@ class App(tk.Tk):
         row = 0
         ttk.Label(sf, text="State:").grid(row=row, column=0, sticky="w", padx=(0, 8))
         self._status_var = tk.StringVar(value="idle")
-        self._status_lbl = ttk.Label(sf, textvariable=self._status_var, font=("Segoe UI", 9, "bold"))
+        self._status_lbl = ttk.Label(sf, textvariable=self._status_var,
+                                     font=("Segoe UI", 9, "bold"))
         self._status_lbl.grid(row=row, column=1, sticky="w")
 
         row += 1
         ttk.Label(sf, text="Phase:").grid(row=row, column=0, sticky="w", padx=(0, 8))
         self._phase_var = tk.StringVar(value="")
-        ttk.Label(sf, textvariable=self._phase_var, foreground="#555").grid(row=row, column=1, sticky="w")
+        ttk.Label(sf, textvariable=self._phase_var, foreground="#555").grid(
+            row=row, column=1, sticky="w")
 
         row += 1
         ttk.Label(sf, text="File:").grid(row=row, column=0, sticky="w", padx=(0, 8))
         self._file_var = tk.StringVar(value="—")
-        ttk.Label(sf, textvariable=self._file_var, wraplength=750, justify="left").grid(row=row, column=1, sticky="w")
+        ttk.Label(sf, textvariable=self._file_var, wraplength=780,
+                  justify="left").grid(row=row, column=1, sticky="w")
 
         row += 1
         ttk.Label(sf, text="Progress:").grid(row=row, column=0, sticky="w", padx=(0, 8))
         prog_frame = ttk.Frame(sf)
         prog_frame.grid(row=row, column=1, sticky="ew", pady=2)
-        self._progressbar = ttk.Progressbar(prog_frame, length=500, maximum=100, mode="determinate")
+        self._progressbar = ttk.Progressbar(prog_frame, length=540, maximum=100,
+                                             mode="determinate")
         self._progressbar.pack(side="left")
         self._pct_var = tk.StringVar(value="0.0%")
         ttk.Label(prog_frame, textvariable=self._pct_var, width=8).pack(side="left", padx=6)
@@ -131,25 +140,29 @@ class App(tk.Tk):
         self._pending_var = tk.StringVar(value="0")
         ttk.Label(sf, textvariable=self._pending_var).grid(row=row, column=1, sticky="w")
 
-        # --- Notebook (Queue / History) ---
+        # --- Notebook ---
         self._nb = ttk.Notebook(self)
         self._nb.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
         self._build_queue_tab()
-        self._build_history_tab()
+        self._build_scheduled_tab()
+
+    # ------------------------------------------------------------------
+    # Queue tab
 
     def _build_queue_tab(self) -> None:
         frame = ttk.Frame(self._nb, padding=(4, 4))
         self._nb.add(frame, text="  Queue  ")
 
         cols = ("file", "status")
-        self._qtree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended")
+        self._qtree = ttk.Treeview(frame, columns=cols, show="headings",
+                                   selectmode="extended")
         self._qtree.heading("file",   text="File",   anchor="w")
         self._qtree.heading("status", text="Status", anchor="center")
         self._qtree.column("file",   stretch=True, anchor="w",      minwidth=200)
         self._qtree.column("status", width=110,    anchor="center", stretch=False)
 
-        for tag, color in _TAG_COLORS.items():
+        for tag, color in _QUEUE_TAG_COLORS.items():
             self._qtree.tag_configure(tag, foreground=color)
 
         vsb = ttk.Scrollbar(frame, orient="vertical",   command=self._qtree.yview)
@@ -162,58 +175,75 @@ class App(tk.Tk):
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
-    def _build_history_tab(self) -> None:
+    # ------------------------------------------------------------------
+    # Scheduled tab  (done / failed — original files managed here)
+
+    def _build_scheduled_tab(self) -> None:
         frame = ttk.Frame(self._nb, padding=(4, 4))
-        self._nb.add(frame, text="  History  ")
+        self._nb.add(frame, text="  Scheduled  ")
 
-        # Summary bar
-        sum_frame = ttk.Frame(frame)
-        sum_frame.pack(fill="x", pady=(0, 4))
-        self._hist_summary_var = tk.StringVar(value="")
-        ttk.Label(sum_frame, textvariable=self._hist_summary_var, foreground="#2E7D32",
+        # --- Action bar ---
+        bar = ttk.Frame(frame)
+        bar.pack(fill="x", pady=(0, 4))
+
+        self._sched_summary_var = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self._sched_summary_var,
+                  foreground="#2E7D32",
                   font=("Segoe UI", 9, "bold")).pack(side="left", padx=4)
-        ttk.Button(sum_frame, text="Clear History", command=self._clear_history).pack(side="right", padx=4)
 
-        # History treeview
-        cols = ("file", "status", "input_mb", "output_mb", "saved", "encoder", "completed", "location")
-        self._htree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse")
+        # Right-side buttons operate on selected row
+        ttk.Button(bar, text="Open Original Folder",
+                   command=self._open_original_folder).pack(side="right", padx=4)
+        ttk.Button(bar, text="Delete Original File",
+                   style="Danger.TButton",
+                   command=self._delete_original).pack(side="right", padx=4)
+        ttk.Button(bar, text="Clear List",
+                   command=self._clear_scheduled).pack(side="right", padx=4)
 
-        self._htree.heading("file",      text="File",       anchor="w")
-        self._htree.heading("status",    text="Status",     anchor="center")
-        self._htree.heading("input_mb",  text="Input MB",   anchor="e")
-        self._htree.heading("output_mb", text="Output MB",  anchor="e")
-        self._htree.heading("saved",     text="Saved",      anchor="center")
-        self._htree.heading("encoder",   text="Encoder",    anchor="center")
-        self._htree.heading("completed", text="Completed",  anchor="center")
-        self._htree.heading("location",  text="Final Path", anchor="w")
+        # --- Treeview ---
+        cols = ("file", "status", "original_exists",
+                "input_mb", "output_mb", "saved",
+                "encoder", "completed", "output_path")
+        self._stree = ttk.Treeview(frame, columns=cols, show="headings",
+                                   selectmode="browse")
 
-        self._htree.column("file",      stretch=True,  anchor="w",      minwidth=160, width=200)
-        self._htree.column("status",    width=80,      anchor="center", stretch=False)
-        self._htree.column("input_mb",  width=80,      anchor="e",      stretch=False)
-        self._htree.column("output_mb", width=80,      anchor="e",      stretch=False)
-        self._htree.column("saved",     width=70,      anchor="center", stretch=False)
-        self._htree.column("encoder",   width=100,     anchor="center", stretch=False)
-        self._htree.column("completed", width=140,     anchor="center", stretch=False)
-        self._htree.column("location",  stretch=True,  anchor="w",      minwidth=160, width=220)
+        self._stree.heading("file",            text="File",            anchor="w")
+        self._stree.heading("status",          text="Status",          anchor="center")
+        self._stree.heading("original_exists", text="Original",        anchor="center")
+        self._stree.heading("input_mb",        text="Input MB",        anchor="e")
+        self._stree.heading("output_mb",       text="Output MB",       anchor="e")
+        self._stree.heading("saved",           text="Saved",           anchor="center")
+        self._stree.heading("encoder",         text="Encoder",         anchor="center")
+        self._stree.heading("completed",       text="Completed",       anchor="center")
+        self._stree.heading("output_path",     text="Output Location", anchor="w")
 
-        for tag, color in _HIST_TAG_COLORS.items():
-            self._htree.tag_configure(tag, foreground=color)
+        self._stree.column("file",            stretch=True,  anchor="w",      minwidth=160, width=200)
+        self._stree.column("status",          width=70,      anchor="center", stretch=False)
+        self._stree.column("original_exists", width=75,      anchor="center", stretch=False)
+        self._stree.column("input_mb",        width=80,      anchor="e",      stretch=False)
+        self._stree.column("output_mb",       width=80,      anchor="e",      stretch=False)
+        self._stree.column("saved",           width=65,      anchor="center", stretch=False)
+        self._stree.column("encoder",         width=100,     anchor="center", stretch=False)
+        self._stree.column("completed",       width=140,     anchor="center", stretch=False)
+        self._stree.column("output_path",     stretch=True,  anchor="w",      minwidth=160, width=240)
 
-        vsb = ttk.Scrollbar(frame, orient="vertical",   command=self._htree.yview)
-        hsb = ttk.Scrollbar(frame, orient="horizontal", command=self._htree.xview)
-        self._htree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        for tag, color in _SCHED_TAG_COLORS.items():
+            self._stree.tag_configure(tag, foreground=color)
+        # Extra tag for deleted originals
+        self._stree.tag_configure("original_gone", foreground="#9E9E9E")
 
-        self._htree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        vsb = ttk.Scrollbar(frame, orient="vertical",   command=self._stree.yview)
+        hsb = ttk.Scrollbar(frame, orient="horizontal", command=self._stree.xview)
+        self._stree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        hsb_frame = ttk.Frame(frame)
-        hsb_frame.pack(fill="x", side="bottom")
-        hsb = ttk.Scrollbar(hsb_frame, orient="horizontal", command=self._htree.xview)
-        hsb.pack(fill="x")
-        self._htree.configure(xscrollcommand=hsb.set)
+        self._stree.grid(row=1, column=0, sticky="nsew")
+        vsb.grid(row=1, column=1, sticky="ns")
+        hsb.grid(row=2, column=0, sticky="ew")
+        frame.rowconfigure(1, weight=1)
+        frame.columnconfigure(0, weight=1)
 
     # ------------------------------------------------------------------
-    # Button handlers
+    # Button handlers — toolbar
 
     def _select_files(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -225,7 +255,6 @@ class App(tk.Tk):
         )
         if paths:
             added = self._queue.add_files(list(paths))
-            self._refresh_queue()
             messagebox.showinfo("FFQueue", f"Added {added} file(s) to queue.")
 
     def _start(self) -> None:
@@ -234,20 +263,9 @@ class App(tk.Tk):
     def _stop(self) -> None:
         self._encoder.request_stop()
 
-    def _clear(self) -> None:
-        self._queue.clear_finished()
-        self._refresh_queue()
-        self._refresh_history()
-
-    def _clear_history(self) -> None:
-        self._queue.clear_finished()
-        self._refresh_history()
-
     def _remove_selected(self) -> None:
-        # Remove from queue tab selection
         for iid in self._qtree.selection():
             self._queue.remove_item(iid)
-        self._refresh_queue()
 
     def _on_close(self) -> None:
         if self._encoder.is_alive() and self._encoder.state.status in ("encoding", "stopping"):
@@ -258,6 +276,60 @@ class App(tk.Tk):
                 return
             self._encoder.request_stop()
         self.destroy()
+
+    # ------------------------------------------------------------------
+    # Button handlers — Scheduled tab
+
+    def _selected_scheduled_item(self) -> dict | None:
+        sel = self._stree.selection()
+        if not sel:
+            messagebox.showinfo("FFQueue", "Select a row first.")
+            return None
+        iid = sel[0]
+        for item in self._queue.get_all():
+            if item["id"] == iid:
+                return item
+        return None
+
+    def _open_original_folder(self) -> None:
+        item = self._selected_scheduled_item()
+        if not item:
+            return
+        original = item.get("file_path", "")
+        if not original:
+            return
+        folder = Path(original).parent
+        if folder.exists():
+            subprocess.Popen(["explorer", str(folder)])
+        else:
+            messagebox.showwarning("FFQueue", f"Folder not found:\n{folder}")
+
+    def _delete_original(self) -> None:
+        item = self._selected_scheduled_item()
+        if not item:
+            return
+        original = item.get("file_path", "")
+        if not original:
+            return
+        p = Path(original)
+        if not p.exists():
+            messagebox.showinfo("FFQueue", "Original file is already gone.")
+            return
+        if not messagebox.askyesno(
+            "Delete Original",
+            f"Permanently delete the original file?\n\n{original}\n\n"
+            "This cannot be undone.",
+            icon="warning",
+        ):
+            return
+        try:
+            p.unlink()
+            messagebox.showinfo("FFQueue", f"Deleted:\n{original}")
+        except OSError as exc:
+            messagebox.showerror("FFQueue", f"Could not delete file:\n{exc}")
+
+    def _clear_scheduled(self) -> None:
+        self._queue.clear_finished()
 
     # ------------------------------------------------------------------
     # Poll loop
@@ -282,37 +354,39 @@ class App(tk.Tk):
         self._pending_var.set(str(self._queue.get_pending_count()))
 
         self._refresh_queue()
-        self._refresh_history()
+        self._refresh_scheduled()
         self.after(POLL_MS, self._poll)
 
     # ------------------------------------------------------------------
-    # Queue tab refresh  (pending + encoding only)
+    # Queue tab refresh
 
     def _refresh_queue(self) -> None:
         items = self._queue.get_all()
         seen: set[str] = set()
+        pending = encoding = 0
 
         for item in items:
-            if item["status"] not in ("pending", "encoding"):
+            st = item["status"]
+            if st not in ("pending", "encoding"):
                 continue
-            iid    = item["id"]
-            fname  = Path(item["file_path"]).name
-            status = item["status"]
-            tag    = status if status in _TAG_COLORS else "pending"
+            iid   = item["id"]
+            fname = Path(item["file_path"]).name
+            tag   = st
             seen.add(iid)
+            if st == "pending":
+                pending += 1
+            else:
+                encoding += 1
 
             if self._qtree.exists(iid):
-                self._qtree.item(iid, values=(fname, status), tags=(tag,))
+                self._qtree.item(iid, values=(fname, st), tags=(tag,))
             else:
-                self._qtree.insert("", "end", iid=iid, values=(fname, status), tags=(tag,))
+                self._qtree.insert("", "end", iid=iid, values=(fname, st), tags=(tag,))
 
         for iid in self._qtree.get_children():
             if iid not in seen:
                 self._qtree.delete(iid)
 
-        # Update tab title with pending count
-        pending = sum(1 for i in items if i["status"] == "pending")
-        encoding = sum(1 for i in items if i["status"] == "encoding")
         label = f"  Queue ({pending} pending"
         if encoding:
             label += ", 1 encoding"
@@ -320,16 +394,16 @@ class App(tk.Tk):
         self._nb.tab(0, text=label)
 
     # ------------------------------------------------------------------
-    # History tab refresh  (done + failed)
+    # Scheduled tab refresh
 
-    def _refresh_history(self) -> None:
-        items = self._queue.get_all()
-        hist  = [i for i in items if i["status"] in ("done", "failed")]
+    def _refresh_scheduled(self) -> None:
+        items     = self._queue.get_all()
+        hist      = [i for i in items if i["status"] in ("done", "failed")]
         seen: set[str] = set()
 
-        total_saved_bytes = 0
-        done_count = 0
-        fail_count = 0
+        total_saved = 0
+        done_count  = 0
+        fail_count  = 0
 
         for item in hist:
             iid    = item["id"]
@@ -341,53 +415,58 @@ class App(tk.Tk):
             out       = item.get("output_size_bytes")
             encoder   = item.get("encoder_used") or "—"
             completed = (item.get("completed_at") or "")[:19].replace("T", " ")
-            final     = item.get("final_path") or item.get("file_path") or "—"
-            # Show only the final path (may be in output_dir or original location)
-            final_display = str(final)
+            final     = item.get("final_path") or "—"
 
-            # Strip duplicate tag for skipped-HEVC items stored as done
-            if "skipped" in encoder.lower():
+            # Check if original still exists on disk
+            orig_path = item.get("file_path", "")
+            orig_exists = Path(orig_path).exists() if orig_path else False
+            orig_label  = "exists" if orig_exists else "deleted"
+
+            skipped = "skipped" in encoder.lower()
+            if skipped:
                 tag = "skipped"
+            elif not orig_exists and status == "done":
+                tag = "original_gone"
             else:
                 tag = status
 
             values = (
                 fname,
                 status,
+                orig_label,
                 _mb(inp),
                 _mb(out),
-                _pct(inp, out),
+                _saved(inp, out),
                 encoder,
                 completed,
-                final_display,
+                final,
             )
 
-            if self._htree.exists(iid):
-                self._htree.item(iid, values=values, tags=(tag,))
+            if self._stree.exists(iid):
+                self._stree.item(iid, values=values, tags=(tag,))
             else:
-                self._htree.insert("", 0, iid=iid, values=values, tags=(tag,))
+                # Insert at top so newest appears first
+                self._stree.insert("", 0, iid=iid, values=values, tags=(tag,))
 
-            if status == "done" and inp and out:
-                total_saved_bytes += max(inp - out, 0)
-                done_count += 1
+            if status == "done" and inp and out and not skipped:
+                total_saved += max(inp - out, 0)
+                done_count  += 1
             elif status == "failed":
-                fail_count += 1
+                fail_count  += 1
 
-        for iid in self._htree.get_children():
+        for iid in self._stree.get_children():
             if iid not in seen:
-                self._htree.delete(iid)
+                self._stree.delete(iid)
 
         # Summary line
-        saved_gb = total_saved_bytes / 1_073_741_824
-        parts = []
+        parts: list[str] = []
         if done_count:
             parts.append(f"{done_count} encoded")
         if fail_count:
             parts.append(f"{fail_count} failed")
-        if total_saved_bytes:
-            parts.append(f"{saved_gb:.2f} GB reclaimed")
-        self._hist_summary_var.set("  " + "  ·  ".join(parts) if parts else "")
+        if total_saved:
+            parts.append(f"{total_saved / 1_073_741_824:.2f} GB reclaimed")
+        self._sched_summary_var.set("  " + "  ·  ".join(parts) if parts else "")
 
-        # Update tab title
         total = len(hist)
-        self._nb.tab(1, text=f"  History ({total})  " if total else "  History  ")
+        self._nb.tab(1, text=f"  Scheduled ({total})  " if total else "  Scheduled  ")

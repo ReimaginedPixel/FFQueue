@@ -13,7 +13,6 @@ import csv
 import logging
 import os
 import re
-import shutil
 import subprocess
 import threading
 import time
@@ -410,14 +409,19 @@ class EncoderWorker:
 
         # ---- 4. Build output paths ---------------------------------------
         src = Path(file_path)
-        temp_path = src.with_name(f"{src.stem}_temp.mkv")
+
+        if self._output_dir:
+            # Output goes to output_dir — original is NEVER modified or deleted.
+            # Temp file lives in output_dir so the final rename is on the same drive.
+            temp_path  = self._output_dir / f"{src.stem}_temp.mkv"
+            final_dest = self._output_dir / src.name
+        else:
+            # No output_dir: encode in-place (replace original with encoded version).
+            temp_path  = src.with_name(f"{src.stem}_temp.mkv")
+            final_dest = src
 
         # Remove stale temp from a previous failed run
-        if temp_path.exists():
-            try:
-                temp_path.unlink()
-            except OSError:
-                pass
+        temp_path.unlink(missing_ok=True)
 
         input_size = src.stat().st_size if src.exists() else 0
 
@@ -432,8 +436,7 @@ class EncoderWorker:
         # NVENC fallback
         if not success and self._nvenc_unavailable(stderr_tail):
             logger.warning("hevc_nvenc unavailable — retrying with libx265.")
-            if temp_path.exists():
-                temp_path.unlink(missing_ok=True)
+            temp_path.unlink(missing_ok=True)
             self.state.update(progress_percent=0.0, eta_seconds=None)
             success, encoder_used, stderr_tail = self._run_ffmpeg(
                 file_path, str(temp_path), kept, duration, use_nvenc=False
@@ -443,9 +446,10 @@ class EncoderWorker:
         if success:
             output_size = temp_path.stat().st_size if temp_path.exists() else 0
 
-            # Replace original with encoded temp
+            # Atomically promote temp → final destination.
+            # When output_dir is set, the original is untouched throughout.
             try:
-                os.replace(str(temp_path), file_path)
+                os.replace(str(temp_path), str(final_dest))
             except OSError as exc:
                 logger.error(f"Rename failed for {file_path!r}: {exc}")
                 temp_path.unlink(missing_ok=True)
@@ -453,20 +457,10 @@ class EncoderWorker:
                 self._session_failed += 1
                 return
 
-            # Move to output_dir if configured
-            final_path = file_path
-            if self._output_dir:
-                dest = self._output_dir / Path(file_path).name
-                try:
-                    shutil.move(file_path, str(dest))
-                    final_path = str(dest)
-                    logger.info(f"Moved to {dest!r}")
-                except OSError as exc:
-                    logger.error(f"Move to output_dir failed for {file_path!r}: {exc} — file stays in place.")
-
-            reduction = (1 - output_size / max(input_size, 1)) * 100
+            final_path = str(final_dest)
+            reduction  = (1 - output_size / max(input_size, 1)) * 100
             logger.info(
-                f"Done: {Path(file_path).name}  "
+                f"Done: {src.name}  "
                 f"{input_size/1_048_576:.1f} MB → {output_size/1_048_576:.1f} MB  "
                 f"({reduction:.1f}% reduction)  →  {final_path!r}"
             )
