@@ -232,15 +232,19 @@ class App(tk.Tk):
         # Extra tag for deleted originals
         self._stree.tag_configure("original_gone", foreground="#9E9E9E")
 
-        vsb = ttk.Scrollbar(frame, orient="vertical",   command=self._stree.yview)
-        hsb = ttk.Scrollbar(frame, orient="horizontal", command=self._stree.xview)
+        # Sub-frame for treeview + scrollbars (grid manager stays inside here)
+        tree_frame = ttk.Frame(frame)
+        tree_frame.pack(fill="both", expand=True)
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical",   command=self._stree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self._stree.xview)
         self._stree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        self._stree.grid(row=1, column=0, sticky="nsew")
-        vsb.grid(row=1, column=1, sticky="ns")
-        hsb.grid(row=2, column=0, sticky="ew")
-        frame.rowconfigure(1, weight=1)
-        frame.columnconfigure(0, weight=1)
+        self._stree.grid(row=0, column=0, sticky="nsew", in_=tree_frame)
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
 
     # ------------------------------------------------------------------
     # Button handlers — toolbar
