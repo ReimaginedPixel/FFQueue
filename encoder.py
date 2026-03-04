@@ -457,6 +457,20 @@ class EncoderWorker:
                 self._session_failed += 1
                 return
 
+            # If output is larger than input, discard it — not worth keeping.
+            if output_size >= input_size:
+                final_dest.unlink(missing_ok=True)
+                error_msg = (
+                    f"Output larger than input "
+                    f"({output_size/1_048_576:.1f} MB >= {input_size/1_048_576:.1f} MB) — discarded."
+                )
+                logger.error(f"{src.name}: {error_msg}")
+                self._queue.mark_failed(item_id, error_msg)
+                self.state.update(status="error")
+                self._notify()
+                self._session_failed += 1
+                return
+
             final_path = str(final_dest)
             reduction  = (1 - output_size / max(input_size, 1)) * 100
             logger.info(
