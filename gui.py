@@ -300,11 +300,13 @@ class App(tk.Tk):
         original = item.get("file_path", "")
         if not original:
             return
-        folder = Path(original).parent
-        if folder.exists():
-            subprocess.Popen(["explorer", str(folder)])
+        p = Path(original)
+        if p.exists():
+            subprocess.Popen(["explorer", f"/select,{p}"])
+        elif p.parent.exists():
+            subprocess.Popen(["explorer", str(p.parent)])
         else:
-            messagebox.showwarning("FFQueue", f"Folder not found:\n{folder}")
+            messagebox.showwarning("FFQueue", f"Folder not found:\n{p.parent}")
 
     def _delete_original(self) -> None:
         item = self._selected_scheduled_item()
