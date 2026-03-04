@@ -534,7 +534,7 @@ class EncoderWorker:
             video_args = [
                 "-c:v", "hevc_nvenc",
                 "-preset", "p4",
-                "-cq", "26",
+                "-cq", "24",
                 "-spatial-aq", "1",
                 "-aq-strength", "8",
             ]
