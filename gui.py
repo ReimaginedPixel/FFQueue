@@ -244,6 +244,8 @@ class App(tk.Tk):
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
 
+        self._stree.bind("<Double-1>", self._copy_scheduled_filename)
+
     # ------------------------------------------------------------------
     # Button handlers — toolbar
 
@@ -281,6 +283,14 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------
     # Button handlers — Scheduled tab
+
+    def _copy_scheduled_filename(self, _event=None) -> None:
+        sel = self._stree.selection()
+        if not sel:
+            return
+        fname = self._stree.item(sel[0], "values")[0]  # first column = filename
+        self.clipboard_clear()
+        self.clipboard_append(fname)
 
     def _selected_scheduled_item(self) -> dict | None:
         sel = self._stree.selection()
